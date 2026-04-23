@@ -1,5 +1,5 @@
 # Radio Browser
-Este programa sirve para escuchar radios de todo el mundo usando la base de datos de Radio Browser. Está pensado para ser usado principalmente con teclado y lectores de pantalla. Es compatible con Windoes 10 y 11 de 64 bits. Existe la posibilidad de que funcione en sistemas más antiguos, pero no me responsabilizo por lo que ocurra al intentarlo ah.
+Este programa sirve para escuchar radios de todo el mundo usando la base de datos de Radio Browser. Está pensado para ser usado principalmente con teclado y lectores de pantalla. Es compatible con Windows 10 y 11 de 64 bits. Existe la posibilidad de que funcione en sistemas más antiguos, pero no me responsabilizo por lo que ocurra al intentarlo ah.
 
 ## Cómo se usa
 La interfaz se divide en pestañas. Te movés entre ellas con Alt + el número de pestaña:
