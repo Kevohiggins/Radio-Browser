@@ -1,2 +1,4 @@
-googletrans==4.0.2
-accessible_output2
+PyQt6
+ffpyplayer
+requests
+accessible-output2
