@@ -1,4 +1,4 @@
-PyQt6
+wxPython
 ffpyplayer
 requests
 accessible-output2
