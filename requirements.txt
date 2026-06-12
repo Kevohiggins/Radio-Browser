@@ -1,4 +1,4 @@
 wxPython
-ffpyplayer
+python-mpv
 requests
 accessible-output2

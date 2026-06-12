@@ -3,9 +3,9 @@
 a = Analysis(
     ['src/main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[('src/mpv-2.dll', '.')],
     datas=[('manual.html', '.')],
-    hiddenimports=['ffpyplayer', 'accessible_output2'],
+    hiddenimports=['accessible_output2'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

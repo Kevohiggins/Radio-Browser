@@ -2,11 +2,9 @@ import wx
 import os
 import json
 import threading
-import win32con
 import speech
 import api
 import player
-import hooks
 from constants import STANDARD_GENRES, GENRE_TAG_MAPPING
 
 # Ruta de la app para guardar config
@@ -16,6 +14,7 @@ else:
     application_path = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(application_path, 'config.json')
+FAVORITES_FILE = os.path.join(application_path, 'favorites.json')
 
 class RadioApp(wx.App):
     def OnInit(self):
@@ -32,9 +31,10 @@ class MainFrame(wx.Frame):
         # Inicializar componentes
         self.player = player.RadioPlayer()
         self.servers = []
-        self.current_stations = []
-        self.favorite_stations = [] # TODO: Cargar de archivo
-        self.translation_cache = {}
+        self.home_stations = []
+        self.genre_stations = []
+        self.favorite_stations = self.load_favorites()
+        self.translation_cache = self.load_cache('cache_translations.json') or {}
         
         # Cargar volumen guardado (por defecto 30)
         self.volume = self.load_volume()
@@ -43,16 +43,28 @@ class MainFrame(wx.Frame):
         self.current_genre_page = 0
         self.current_search = ""
         self.current_genre = ""
+        self.current_request_id = 0
         
         # UI
         self.init_ui()
+        self.update_favorites_list()
         
-        # Cargar servidores en segundo plano
-        threading.Thread(target=self.load_servers, daemon=True).start()
+        # Pre-cargar interfaz "Offline-First"
+        cached_home = self.load_cache('cache_home.json')
+        if cached_home:
+            self.home_stations = cached_home
+            self.update_stations_list(cached_home, force_ui_only=True)
+            
+        cached_servers = self.load_cache('cache_servers.json')
+        if cached_servers:
+            self.servers = cached_servers
+            self.load_recent_stations()
+            threading.Thread(target=self.update_servers_bg, daemon=True).start()
+        else:
+            threading.Thread(target=self.load_servers, daemon=True).start()
         
-        # Iniciar Hook de Windows
-        self.hook = hooks.WindowsHook(self.on_key_down)
-        self.hook.start()
+        # Configurar atajos de teclado locales
+        self.setup_accelerators()
         
         self.Bind(wx.EVT_CLOSE, self.on_close)
         
@@ -98,12 +110,25 @@ class MainFrame(wx.Frame):
         tab = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
-        lbl = wx.StaticText(tab, label="Buscar emisoras por nombre:")
-        sizer.Add(lbl, 0, wx.ALL, 5)
+        # Sizer horizontal para búsqueda y proveedor
+        search_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        lbl_search = wx.StaticText(tab, label="Buscar emisoras por nombre:")
+        search_sizer.Add(lbl_search, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
         
         self.txt_search = wx.TextCtrl(tab, style=wx.TE_PROCESS_ENTER)
         self.txt_search.Bind(wx.EVT_TEXT_ENTER, self.on_search_enter)
-        sizer.Add(self.txt_search, 0, wx.EXPAND | wx.ALL, 5)
+        search_sizer.Add(self.txt_search, 1, wx.EXPAND | wx.ALL, 5)
+        
+        lbl_prov = wx.StaticText(tab, label="Proveedor:")
+        search_sizer.Add(lbl_prov, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        
+        self.choice_provider = wx.Choice(tab, choices=["Radio-Browser", "TuneIn"])
+        self.choice_provider.SetSelection(0)
+        self.choice_provider.Bind(wx.EVT_CHOICE, self.on_provider_change)
+        search_sizer.Add(self.choice_provider, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        
+        sizer.Add(search_sizer, 0, wx.EXPAND)
         
         self.lst_stations = wx.ListBox(tab)
         self.lst_stations.Bind(wx.EVT_LISTBOX_DCLICK, self.on_station_dclick)
@@ -190,45 +215,42 @@ Usa la base de datos pública de Radio Browser.\n
         tab.SetSizer(sizer)
         self.notebook.AddPage(tab, "Acerca de")
         
-    def on_key_down(self, vk, mask):
-        # Ctrl + R: Reproducir/Detener
-        if vk == ord('R') and (mask & hooks.MOD_CTRL):
-            wx.CallAfter(self.toggle_playback)
-            return True
-            
-        # Ctrl + C: Copiar URL
-        if vk == ord('C') and (mask & hooks.MOD_CTRL):
-            wx.CallAfter(self.copy_current_url)
-            return True
-            
-        # F8: Subir Volumen
-        if vk == win32con.VK_F8:
-            wx.CallAfter(self.adjust_volume, 5)
-            return True
-            
-        # F7: Bajar Volumen
-        if vk == win32con.VK_F7:
-            wx.CallAfter(self.adjust_volume, -5)
-            return True
-            
-        # Ctrl + Izquierda: Página Anterior
-        if vk == win32con.VK_LEFT and (mask & hooks.MOD_CTRL):
-            wx.CallAfter(self.on_prev_page, None)
-            return True
-            
-        # Ctrl + Derecha: Página Siguiente
-        if vk == win32con.VK_RIGHT and (mask & hooks.MOD_CTRL):
-            wx.CallAfter(self.on_next_page, None)
-            return True
-            
-        # Alt + 1, 2, 3, 4: Cambiar de pestaña
-        if mask & hooks.MOD_ALT:
-            if vk == ord('1'): wx.CallAfter(self.notebook.SetSelection, 0); return True
-            if vk == ord('2'): wx.CallAfter(self.notebook.SetSelection, 1); return True
-            if vk == ord('3'): wx.CallAfter(self.notebook.SetSelection, 2); return True
-            if vk == ord('4'): wx.CallAfter(self.notebook.SetSelection, 3); return True
-            
-        return False
+    def setup_accelerators(self):
+        id_play = wx.NewIdRef()
+        id_copy = wx.NewIdRef()
+        id_vol_up = wx.NewIdRef()
+        id_vol_down = wx.NewIdRef()
+        id_prev = wx.NewIdRef()
+        id_next = wx.NewIdRef()
+        id_tab_1 = wx.NewIdRef()
+        id_tab_2 = wx.NewIdRef()
+        id_tab_3 = wx.NewIdRef()
+        id_tab_4 = wx.NewIdRef()
+
+        self.Bind(wx.EVT_MENU, lambda e: self.toggle_playback(), id=id_play)
+        self.Bind(wx.EVT_MENU, lambda e: self.copy_current_url(), id=id_copy)
+        self.Bind(wx.EVT_MENU, lambda e: self.adjust_volume(5), id=id_vol_up)
+        self.Bind(wx.EVT_MENU, lambda e: self.adjust_volume(-5), id=id_vol_down)
+        self.Bind(wx.EVT_MENU, lambda e: self.on_prev_page(None), id=id_prev)
+        self.Bind(wx.EVT_MENU, lambda e: self.on_next_page(None), id=id_next)
+        self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(0), id=id_tab_1)
+        self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(1), id=id_tab_2)
+        self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(2), id=id_tab_3)
+        self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(3), id=id_tab_4)
+
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord('R'), id_play),
+            (wx.ACCEL_CTRL, ord('C'), id_copy),
+            (wx.ACCEL_NORMAL, wx.WXK_F8, id_vol_up),
+            (wx.ACCEL_NORMAL, wx.WXK_F7, id_vol_down),
+            (wx.ACCEL_CTRL, wx.WXK_LEFT, id_prev),
+            (wx.ACCEL_CTRL, wx.WXK_RIGHT, id_next),
+            (wx.ACCEL_ALT, ord('1'), id_tab_1),
+            (wx.ACCEL_ALT, ord('2'), id_tab_2),
+            (wx.ACCEL_ALT, ord('3'), id_tab_3),
+            (wx.ACCEL_ALT, ord('4'), id_tab_4)
+        ])
+        self.SetAcceleratorTable(accel_tbl)
         
     def on_list_key_down(self, event):
         keycode = event.GetKeyCode()
@@ -244,7 +266,9 @@ Usa la base de datos pública de Radio Browser.\n
         idx = active_list.GetSelection()
         if idx == wx.NOT_FOUND: return
         
-        station = self.current_stations[idx]
+        stations = self.get_active_stations()
+        if idx >= len(stations): return
+        station = stations[idx]
         
         menu = wx.Menu()
         item_fav = menu.Append(wx.ID_ANY, "Agregar/Quitar Favorito")
@@ -257,7 +281,27 @@ Usa la base de datos pública de Radio Browser.\n
         menu.Destroy()
         
     def on_menu_fav(self, station):
-        speech.say("Función de favoritos no implementada aún en wxPython.")
+        uuid = station.get('stationuuid')
+        found_idx = -1
+        for idx, fav in enumerate(self.favorite_stations):
+            if fav.get('stationuuid') == uuid:
+                found_idx = idx
+                break
+                
+        if found_idx != -1:
+            self.favorite_stations.pop(found_idx)
+            self.save_favorites()
+            self.update_favorites_list()
+            speech.say(f"Quitada de favoritos: {station.get('name')}")
+            self.SetStatusText(f"Quitada de favoritos: {station.get('name')}")
+        else:
+            if 'provider' not in station:
+                station['provider'] = 'radio-browser'
+            self.favorite_stations.append(station)
+            self.save_favorites()
+            self.update_favorites_list()
+            speech.say(f"Agregada a favoritos: {station.get('name')}")
+            self.SetStatusText(f"Agregada a favoritos: {station.get('name')}")
         
     def on_menu_copy(self, station):
         url = station.get('url_resolved') or station.get('url')
@@ -275,9 +319,35 @@ Usa la base de datos pública de Radio Browser.\n
         active_list = self.get_active_list()
         if not active_list: return
         idx = active_list.GetSelection()
-        if idx != wx.NOT_FOUND and idx < len(self.current_stations):
-            station = self.current_stations[idx]
+        stations = self.get_active_stations()
+        if idx != wx.NOT_FOUND and idx < len(stations):
+            station = stations[idx]
             self.on_menu_copy(station)
+
+    def load_favorites(self):
+        try:
+            if os.path.exists(FAVORITES_FILE):
+                with open(FAVORITES_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error al cargar favoritos: {e}")
+        return []
+        
+    def save_favorites(self):
+        try:
+            with open(FAVORITES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.favorite_stations, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error al guardar favoritos: {e}")
+
+    def update_favorites_list(self):
+        self.lst_favorites.Clear()
+        for s in self.favorite_stations:
+            name = s.get('name', 'Sin nombre')
+            country = s.get('country_es', '')
+            provider = s.get('provider', 'radio-browser')
+            prov_lbl = "TuneIn" if provider == 'tunein' else "RadioBrowser"
+            self.lst_favorites.Append(f"{name} ({country}) [{prov_lbl}]")
         
     # --- Lógica ---
     
@@ -305,30 +375,89 @@ Usa la base de datos pública de Radio Browser.\n
         except Exception as e:
             print(f"Error al guardar config: {e}")
     
+    def load_cache(self, filename):
+        try:
+            path = os.path.join(application_path, filename)
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return None
+
+    def save_cache(self, filename, data):
+        try:
+            path = os.path.join(application_path, filename)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+            
+    def update_servers_bg(self):
+        new_servers = api.get_radio_browser_servers()
+        if new_servers:
+            self.servers = new_servers
+            self.save_cache('cache_servers.json', new_servers)
+
     def load_servers(self):
         self.SetStatusText("Obteniendo servidores...")
         self.servers = api.get_radio_browser_servers()
+        if self.servers:
+            self.save_cache('cache_servers.json', self.servers)
         self.SetStatusText("Listo")
         self.load_recent_stations()
         
+    def on_provider_change(self, event):
+        self.current_search = ""
+        self.current_page = 0
+        self.load_recent_stations()
+
     def load_recent_stations(self, page=0):
-        self.SetStatusText("Cargando estaciones recientes...")
+        sel = 0
+        if hasattr(self, 'choice_provider'):
+            sel = self.choice_provider.GetSelection()
+
+        if sel == 1:
+            self.SetStatusText("Cargando emisoras de TuneIn...")
+        else:
+            self.SetStatusText("Cargando estaciones recientes/populares...")
+            
+        self.current_request_id += 1
+        req_id = self.current_request_id
+            
         def _bg():
-            stations = api.load_recent_stations(self.servers, page)
-            for s in stations:
-                s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
-            wx.CallAfter(self.update_stations_list, stations)
+            if sel == 1:
+                stations = api.load_tunein_local_stations()
+            else:
+                stations = api.load_recent_stations(self.servers, page)
+                for s in stations:
+                    s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
+                    s['provider'] = 'radio-browser'
+                
+            wx.CallAfter(self.update_stations_list, stations, req_id, True)
         threading.Thread(target=_bg, daemon=True).start()
         
-    def update_stations_list(self, stations):
-        self.current_stations = stations
+    def update_stations_list(self, stations, req_id=None, save_to_cache=False, force_ui_only=False):
+        if req_id is not None and req_id != self.current_request_id:
+            return
+            
+        self.home_stations = stations
         self.lst_stations.Clear()
         for s in stations:
             name = s.get('name', 'Sin nombre')
             country = s.get('country_es', '')
-            self.lst_stations.Append(f"{name} ({country})")
-        self.SetStatusText("Listo")
-        speech.say(f"Se cargaron {len(stations)} estaciones.")
+            provider = s.get('provider', 'radio-browser')
+            prov_lbl = "TuneIn" if provider == 'tunein' else "RadioBrowser"
+            self.lst_stations.Append(f"{name} ({country}) [{prov_lbl}]")
+            
+        if not force_ui_only:
+            self.SetStatusText("Listo")
+            speech.say(f"Se cargaron {len(stations)} estaciones.")
+            self.resolve_tunein_bg(self.home_stations)
+            
+        if save_to_cache:
+            self.save_cache('cache_home.json', stations)
+            self.save_cache('cache_translations.json', self.translation_cache)
         
     def on_play_click(self, event):
         self.toggle_playback()
@@ -348,8 +477,9 @@ Usa la base de datos pública de Radio Browser.\n
                 speech.say("No hay estaciones en la lista.")
                 return
                 
-        if idx < len(self.current_stations):
-            station = self.current_stations[idx]
+        stations = self.get_active_stations()
+        if idx < len(stations):
+            station = stations[idx]
             
             current_playing = self.player.current_station
             
@@ -358,15 +488,51 @@ Usa la base de datos pública de Radio Browser.\n
                 self.btn_play.SetLabel("Reproducir")
                 speech.say("Reproducción detenida.")
             else:
-                url = station.get('url_resolved') or station.get('url')
-                if url:
-                    vol = self.slider_volume.GetValue() / 100.0
-                    self.player.play(url, vol)
-                    self.player.current_station = station
-                    self.btn_play.SetLabel("Detener")
-                    speech.say(f"Reproduciendo {station.get('name')}")
-                else:
-                    speech.say("No se encontró URL de stream.")
+                self.SetStatusText("Preparando reproducción...")
+                speech.say("Preparando reproducción...")
+                def _bg():
+                    provider = station.get('provider', 'radio-browser')
+                    url = None
+                    error_msg = None
+                    
+                    if provider == 'tunein':
+                        if not station.get('url_resolved'):
+                            resolved = api.resolve_tunein_stream(station.get('url'))
+                            if resolved:
+                                station['url_resolved'] = resolved
+                        url = station.get('url_resolved')
+                        
+                        if url:
+                            url = api.resolve_stream_url(url)
+                            station['url_resolved'] = url
+                    else:
+                        url = station.get('url_resolved') or station.get('url')
+                        
+                    if url and ("notcompatible" in url or "georestricted" in url):
+                        url = None
+                        error_msg = "La estación no es compatible o está restringida."
+
+                    if url:
+                        wx.CallAfter(self.do_play, station, url)
+                    else:
+                        wx.CallAfter(self.do_play_error, station, error_msg)
+                threading.Thread(target=_bg, daemon=True).start()
+
+    def do_play(self, station, url):
+        vol = self.slider_volume.GetValue() / 100.0
+        if self.player.play(url, vol):
+            self.player.current_station = station
+            self.btn_play.SetLabel("Detener")
+            self.SetStatusText(f"Reproduciendo: {station.get('name')}")
+            speech.say(f"Reproduciendo {station.get('name')}")
+        else:
+            self.SetStatusText("Error al iniciar reproducción")
+            speech.say("Error al iniciar reproducción.")
+
+    def do_play_error(self, station, error_msg=None):
+        msg = error_msg if error_msg else "No se pudo obtener la URL de stream."
+        self.SetStatusText(msg)
+        speech.say(msg)
                     
     def get_active_list(self):
         sel = self.notebook.GetSelection()
@@ -374,6 +540,13 @@ Usa la base de datos pública de Radio Browser.\n
         if sel == 1: return self.lst_genre_stations
         if sel == 2: return self.lst_favorites
         return None
+
+    def get_active_stations(self):
+        sel = self.notebook.GetSelection()
+        if sel == 0: return self.home_stations
+        if sel == 1: return self.genre_stations
+        if sel == 2: return self.favorite_stations
+        return []
         
     def on_volume_change(self, event):
         self.volume = self.slider_volume.GetValue()
@@ -393,11 +566,23 @@ Usa la base de datos pública de Radio Browser.\n
             self.current_search = query
             self.current_page = 0
             self.SetStatusText(f"Buscando '{query}'...")
+            
+            sel = 0
+            if hasattr(self, 'choice_provider'):
+                sel = self.choice_provider.GetSelection()
+                    
+            self.current_request_id += 1
+            req_id = self.current_request_id
+            
             def _bg():
-                stations = api.search_stations(query, self.servers, 0)
-                for s in stations:
-                    s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
-                wx.CallAfter(self.update_stations_list, stations)
+                if sel == 1:
+                    stations = api.search_tunein_stations(query)
+                else:
+                    stations = api.search_stations(query, self.servers, 0)
+                    for s in stations:
+                        s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
+                        s['provider'] = 'radio-browser'
+                wx.CallAfter(self.update_stations_list, stations, req_id)
             threading.Thread(target=_bg, daemon=True).start()
             
     def on_station_dclick(self, event):
@@ -415,14 +600,31 @@ Usa la base de datos pública de Radio Browser.\n
     def load_page(self):
         page = self.current_page
         self.SetStatusText(f"Cargando página {page + 1}...")
+        
+        sel = 0
+        if hasattr(self, 'choice_provider'):
+            sel = self.choice_provider.GetSelection()
+                
+        self.current_request_id += 1
+        req_id = self.current_request_id
+        
         def _bg():
             if self.current_search:
-                stations = api.search_stations(self.current_search, self.servers, page)
+                if sel == 1:
+                    stations = api.search_tunein_stations(self.current_search)
+                else:
+                    stations = api.search_stations(self.current_search, self.servers, page)
             else:
-                stations = api.load_recent_stations(self.servers, page)
-            for s in stations:
-                s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
-            wx.CallAfter(self.update_stations_list, stations)
+                if sel == 1:
+                    stations = api.load_tunein_local_stations() if page == 0 else []
+                else:
+                    stations = api.load_recent_stations(self.servers, page)
+                    
+            if sel != 1:
+                for s in stations:
+                    s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
+                    s['provider'] = 'radio-browser'
+            wx.CallAfter(self.update_stations_list, stations, req_id)
         threading.Thread(target=_bg, daemon=True).start()
         
     def on_genre_load(self, event):
@@ -432,15 +634,22 @@ Usa la base de datos pública de Radio Browser.\n
             self.current_genre = genre
             self.current_genre_page = 0
             self.SetStatusText(f"Cargando género {genre}...")
+            self.current_request_id += 1
+            req_id = self.current_request_id
+            
             def _bg():
                 stations = api.load_genre_stations(genre, self.servers, 0, GENRE_TAG_MAPPING)
                 for s in stations:
                     s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
-                wx.CallAfter(self.update_genre_list, stations)
+                    s['provider'] = 'radio-browser'
+                wx.CallAfter(self.update_genre_list, stations, req_id, True)
             threading.Thread(target=_bg, daemon=True).start()
             
-    def update_genre_list(self, stations):
-        self.current_stations = stations
+    def update_genre_list(self, stations, req_id=None, save_to_cache=False):
+        if req_id is not None and req_id != self.current_request_id:
+            return
+            
+        self.genre_stations = stations
         self.lst_genre_stations.Clear()
         for s in stations:
             name = s.get('name', 'Sin nombre')
@@ -448,13 +657,54 @@ Usa la base de datos pública de Radio Browser.\n
             self.lst_genre_stations.Append(f"{name} ({country})")
         self.SetStatusText("Listo")
         speech.say("Estaciones de género cargadas.")
+        self.resolve_tunein_bg(self.genre_stations)
         
-    def on_genre_prev(self, event): pass
-    def on_genre_next(self, event): pass
+        if save_to_cache:
+            self.save_cache('cache_genres.json', stations)
+            self.save_cache('cache_translations.json', self.translation_cache)
+        
+    def on_genre_prev(self, event):
+        if self.current_genre_page > 0:
+            self.current_genre_page -= 1
+            self.load_genre_page()
+            
+    def on_genre_next(self, event):
+        self.current_genre_page += 1
+        self.load_genre_page()
+        
+    def load_genre_page(self):
+        genre = self.current_genre
+        page = self.current_genre_page
+        if not genre: return
+        self.SetStatusText(f"Cargando página {page + 1} de género {genre}...")
+        self.current_request_id += 1
+        req_id = self.current_request_id
+        
+        def _bg():
+            stations = api.load_genre_stations(genre, self.servers, page, GENRE_TAG_MAPPING)
+            for s in stations:
+                s['country_es'] = api.translate_location(s.get('country', ''), self.translation_cache)
+                s['provider'] = 'radio-browser'
+            wx.CallAfter(self.update_genre_list, stations, req_id, True)
+        threading.Thread(target=_bg, daemon=True).start()
     
+    def resolve_tunein_bg(self, stations):
+        def _bg():
+            from concurrent.futures import ThreadPoolExecutor
+            def resolve_station(s):
+                if s.get('provider') == 'tunein' and not s.get('url_resolved'):
+                    try:
+                        resolved = api.resolve_tunein_stream(s.get('url'))
+                        if resolved:
+                            s['url_resolved'] = api.resolve_stream_url(resolved)
+                    except Exception:
+                        pass
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                executor.map(resolve_station, stations)
+        threading.Thread(target=_bg, daemon=True).start()
+        
     def on_close(self, event):
         self.save_volume()
-        self.hook.stop()
         event.Skip()
 
 if __name__ == '__main__':

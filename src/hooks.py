@@ -20,6 +20,12 @@ HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, ctypes.POI
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Configurar tipos de retorno y argumentos para evitar problemas de truncamiento de punteros
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+
 # Modificadores
 MOD_SHIFT = 1
 MOD_CTRL = 2
@@ -82,11 +88,17 @@ class WindowsHook:
         
     def _hook_callback(self, nCode, wParam, lParam):
         if nCode >= 0 and wParam == win32con.WM_KEYDOWN:
-            vk = lParam.contents.vkCode
-            mask = self._get_current_mask()
-            
-            # Llamar al callback del usuario
-            if self.callback(vk, mask):
-                return 1 # Bloquear la tecla si el callback devuelve True
+            # Solo procesar si nuestra ventana está en primer plano
+            hwnd = user32.GetForegroundWindow()
+            if hwnd:
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value == kernel32.GetCurrentProcessId():
+                    vk = lParam.contents.vkCode
+                    mask = self._get_current_mask()
+                    
+                    # Llamar al callback del usuario
+                    if self.callback(vk, mask):
+                        return 1 # Bloquear la tecla si el callback devuelve True
                 
         return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
