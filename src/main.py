@@ -400,6 +400,7 @@ Usa la base de datos pública de Radio Browser.\n
         id_tab_2 = wx.NewIdRef()
         id_tab_3 = wx.NewIdRef()
         id_tab_4 = wx.NewIdRef()
+        id_tab_5 = wx.NewIdRef()
         id_meta = wx.NewIdRef()
 
         self.Bind(wx.EVT_MENU, lambda e: self.toggle_playback(), id=id_play)
@@ -413,6 +414,7 @@ Usa la base de datos pública de Radio Browser.\n
         self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(1), id=id_tab_2)
         self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(2), id=id_tab_3)
         self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(3), id=id_tab_4)
+        self.Bind(wx.EVT_MENU, lambda e: self.notebook.SetSelection(4), id=id_tab_5)
 
         accel_tbl = wx.AcceleratorTable([
             (wx.ACCEL_CTRL, ord('R'), id_play),
@@ -425,7 +427,8 @@ Usa la base de datos pública de Radio Browser.\n
             (wx.ACCEL_ALT, ord('1'), id_tab_1),
             (wx.ACCEL_ALT, ord('2'), id_tab_2),
             (wx.ACCEL_ALT, ord('3'), id_tab_3),
-            (wx.ACCEL_ALT, ord('4'), id_tab_4)
+            (wx.ACCEL_ALT, ord('4'), id_tab_4),
+            (wx.ACCEL_ALT, ord('5'), id_tab_5)
         ])
         self.SetAcceleratorTable(accel_tbl)
         
