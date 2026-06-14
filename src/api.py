@@ -1,8 +1,11 @@
 import requests
 import socket
+import urllib3
 import random
 import json
 import os
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 PAGE_SIZE = 20
 
@@ -278,45 +281,51 @@ def load_tunein_local_stations():
 
 def resolve_stream_url(url, depth=0):
     """
-    Sigue las redirecciones HTTP (como las de StreamTheWorld o playlists)
-    para obtener la URL final directa del stream.
+    Descarga las listas de reproducción problemáticas (.pls, .m3u) usando
+    Python para evadir bloqueos de User-Agent, y las guarda en un archivo
+    temporal local para que MPV las lea con todas sus pistas de respaldo.
     """
-    if not url or depth > 3:
+    if not url or depth > 2:
         return url
         
-    if "notcompatible.enUS.mp3" in url or "georestricted.enUS.mp3" in url:
+    if "opml.radiotime.com/Tune.ashx" in url and "render=json" not in url:
+        try:
+            json_url = url + "&render=json" if "?" in url else url + "?render=json"
+            r = requests.get(json_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get('body') and isinstance(data['body'], list):
+                    stream_url = data['body'][0].get('url', url)
+                    return resolve_stream_url(stream_url, depth + 1)
+        except Exception as e:
+            print(f"[API] Error resolviendo TuneIn JSON: {e}")
+            
+    if not any(ext in url.lower() for ext in ['.m3u', '.pls', 'listen.pls', '.ashx']):
         return url
         
     try:
-        headers = {'User-Agent': 'mpv 0.38.0'}
-        r = requests.get(url, headers=headers, allow_redirects=True, stream=True, timeout=5)
-        final_url = r.url
-        content_type = r.headers.get('Content-Type', '').lower()
+        # Descargar el playlist usando headers web para evitar error 400/403
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        r = requests.get(url, headers=headers, allow_redirects=True, timeout=5, verify=False)
         
+        content_type = r.headers.get('Content-Type', '').lower()
         is_playlist = False
-        if 'mpegurl' in content_type or 'scpls' in content_type or 'playlist' in content_type or 'audio/x-scpls' in content_type:
+        
+        if 'mpegurl' in content_type or 'scpls' in content_type or 'playlist' in content_type:
             is_playlist = True
-        elif any(ext in final_url.lower() for ext in ['.m3u', '.pls', 'listen.pls']):
-            # No analizar archivos HLS (.m3u8) manualmente, FFmpeg los soporta de forma nativa
-            if '.m3u8' not in final_url.lower() and 'audio/mpeg' not in content_type and 'audio/aac' not in content_type:
+        elif any(ext in r.url.lower() for ext in ['.m3u', '.pls', 'listen.pls']):
+            if '.m3u8' not in r.url.lower():
                 is_playlist = True
                 
         if is_playlist:
-            # Leer el contenido del playlist
             content = r.content.decode('utf-8', errors='ignore')
-            r.close()
+            import os
+            temp_file = os.path.join(os.environ.get('TEMP', ''), 'radio_temp_playlist.pls')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return temp_file
             
-            for line in content.splitlines():
-                line = line.strip()
-                if line.lower().startswith('file') and '=' in line:
-                    parts = line.split('=', 1)
-                    if len(parts) == 2 and parts[1].startswith('http'):
-                        return resolve_stream_url(parts[1], depth + 1)
-                elif line.startswith('http'):
-                    return resolve_stream_url(line, depth + 1)
-        
-        r.close()
-        return final_url
+        return r.url
     except Exception as e:
-        print(f"[API] Error resolviendo redirecciones para {url}: {e}")
+        print(f"[API] Error descargando playlist {url}: {e}")
         return url

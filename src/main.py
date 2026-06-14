@@ -5,6 +5,7 @@ import threading
 import speech
 import api
 import player
+import iptv
 from constants import STANDARD_GENRES, GENRE_TAG_MAPPING
 
 # Ruta de la app para guardar config
@@ -82,6 +83,7 @@ class MainFrame(wx.Frame):
         self.create_home_tab()
         self.create_genres_tab()
         self.create_favorites_tab()
+        self.create_iptv_tab()
         self.create_about_tab()
         
         # Controles globales (abajo)
@@ -200,6 +202,178 @@ class MainFrame(wx.Frame):
         tab.SetSizer(sizer)
         self.notebook.AddPage(tab, "Favoritos")
         
+    def create_iptv_tab(self):
+        tab = wx.Panel(self.notebook)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        search_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        lbl = wx.StaticText(tab, label="Buscar Canal de TV:")
+        search_sizer.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        
+        self.txt_iptv_search = wx.TextCtrl(tab, style=wx.TE_PROCESS_ENTER)
+        self.txt_iptv_search.Bind(wx.EVT_TEXT_ENTER, self.on_iptv_search)
+        search_sizer.Add(self.txt_iptv_search, 1, wx.EXPAND | wx.ALL, 5)
+        
+        btn_search = wx.Button(tab, label="Buscar")
+        btn_search.Bind(wx.EVT_BUTTON, self.on_iptv_search)
+        search_sizer.Add(btn_search, 0, wx.ALL, 5)
+        
+        sizer.Add(search_sizer, 0, wx.EXPAND)
+        
+        filter_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        lbl_country = wx.StaticText(tab, label="País:")
+        filter_sizer.Add(lbl_country, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.cmb_iptv_country = wx.ComboBox(tab, style=wx.CB_READONLY)
+        self.cmb_iptv_country.Append("Todos")
+        self.cmb_iptv_country.SetSelection(0)
+        self.cmb_iptv_country.Bind(wx.EVT_COMBOBOX, self.on_iptv_search)
+        filter_sizer.Add(self.cmb_iptv_country, 1, wx.EXPAND | wx.ALL, 5)
+        
+        lbl_group = wx.StaticText(tab, label="Categoría:")
+        filter_sizer.Add(lbl_group, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 5)
+        self.cmb_iptv_group = wx.ComboBox(tab, style=wx.CB_READONLY)
+        self.cmb_iptv_group.Append("Todas")
+        self.cmb_iptv_group.SetSelection(0)
+        self.cmb_iptv_group.Bind(wx.EVT_COMBOBOX, self.on_iptv_search)
+        filter_sizer.Add(self.cmb_iptv_group, 1, wx.EXPAND | wx.ALL, 5)
+        
+        sizer.Add(filter_sizer, 0, wx.EXPAND)
+        
+        self.lst_iptv = wx.ListBox(tab)
+        self.lst_iptv.Bind(wx.EVT_LISTBOX_DCLICK, self.on_station_dclick)
+        self.lst_iptv.Bind(wx.EVT_KEY_DOWN, self.on_list_key_down)
+        self.lst_iptv.Bind(wx.EVT_CONTEXT_MENU, self.on_context_menu)
+        sizer.Add(self.lst_iptv, 1, wx.EXPAND | wx.ALL, 5)
+        
+        tab.SetSizer(sizer)
+        self.notebook.AddPage(tab, "Televisión (IPTV)")
+        
+        self.iptv_current_page = 0
+        self.iptv_items_per_page = 30
+        self.current_iptv_filtered = []
+        self.adult_channels = []
+        
+        # Cargar IPTV en segundo plano o desde caché
+        self.iptv_channels = iptv.get_channels(self.on_iptv_loaded)
+        if self.iptv_channels:
+            self.on_iptv_loaded(self.iptv_channels)
+            
+        # Cargar canales adultos en segundo plano o desde caché
+        self.adult_channels = iptv.get_adult_channels(self.on_adult_loaded)
+        if self.adult_channels:
+            self.on_adult_loaded(self.adult_channels)
+            
+        self.update_iptv_list()
+        
+    def on_adult_loaded(self, channels):
+        if channels:
+            self.adult_channels = channels
+            # Re-popular filtros para incluir 'Adultos' si no estaba
+            wx.CallAfter(self._ensure_adultos_in_filters)
+            # Refrescar la lista si el usuario ya tiene "Adultos" seleccionado
+            wx.CallAfter(self._refresh_if_adultos)
+            
+    def _ensure_adultos_in_filters(self):
+        if self.cmb_iptv_group.FindString("Adultos") == wx.NOT_FOUND:
+            self.cmb_iptv_group.Append("Adultos")
+    
+    def _refresh_if_adultos(self):
+        if self.cmb_iptv_group.GetStringSelection() == "Adultos":
+            self.update_iptv_list()
+        
+    def on_iptv_loaded(self, channels):
+        if channels:
+            self.iptv_channels = channels
+            countries = sorted(list(set(c.get('country', '') for c in channels if c.get('country'))))
+            groups = sorted(list(set(c.get('group', '') for c in channels if c.get('group'))))
+            # Actualizar la UI de forma segura
+            wx.CallAfter(self._populate_iptv_filters, countries, groups)
+            wx.CallAfter(self.update_iptv_list)
+            
+    def _populate_iptv_filters(self, countries, groups):
+        sel_country = self.cmb_iptv_country.GetStringSelection()
+        sel_group = self.cmb_iptv_group.GetStringSelection()
+        
+        self.cmb_iptv_country.Clear()
+        self.cmb_iptv_country.Append("Todos")
+        for c in countries: self.cmb_iptv_country.Append(c)
+        if self.cmb_iptv_country.FindString(sel_country) != wx.NOT_FOUND:
+            self.cmb_iptv_country.SetStringSelection(sel_country)
+        else:
+            self.cmb_iptv_country.SetSelection(0)
+            
+        self.cmb_iptv_group.Clear()
+        self.cmb_iptv_group.Append("Todas")
+        for g in groups: self.cmb_iptv_group.Append(g)
+        
+        # Si ya cargaron los canales de adultos, re-agregarlo para que no se pierda
+        if hasattr(self, 'adult_channels') and self.adult_channels:
+            if self.cmb_iptv_group.FindString("Adultos") == wx.NOT_FOUND:
+                self.cmb_iptv_group.Append("Adultos")
+                
+        if self.cmb_iptv_group.FindString(sel_group) != wx.NOT_FOUND:
+            self.cmb_iptv_group.SetStringSelection(sel_group)
+        else:
+            self.cmb_iptv_group.SetSelection(0)
+            
+    def update_iptv_list(self, reset_page=True):
+        self.lst_iptv.Clear()
+            
+        if reset_page:
+            self.iptv_current_page = 0
+            
+        query = self.txt_iptv_search.GetValue().lower()
+        country_filter = self.cmb_iptv_country.GetStringSelection()
+        group_filter = self.cmb_iptv_group.GetStringSelection()
+        
+        # Decidir qué lista base usar
+        if group_filter == "Adultos":
+            source = getattr(self, 'adult_channels', []) or []
+        else:
+            source = getattr(self, 'iptv_channels', []) or []
+        
+        if not source:
+            if group_filter == "Adultos":
+                self.lst_iptv.Append("Descargando canales de adultos... Por favor espera unos segundos.")
+            else:
+                self.lst_iptv.Append("Descargando o cargando lista gigante de TV... Por favor espera unos segundos.")
+            return
+        
+        results = []
+        for c in source:
+            if query and query not in c.get('name', '').lower():
+                continue
+            if country_filter and country_filter != "Todos" and c.get('country', '') != country_filter:
+                continue
+            # Si es "Todas", excluir adultos
+            if group_filter == "Todas" and c.get('group', '') == 'Adultos':
+                continue
+            if group_filter and group_filter != "Todas" and c.get('group', '') != group_filter:
+                continue
+            results.append(c)
+            
+        self.current_iptv_filtered = results
+        
+        start_idx = getattr(self, 'iptv_current_page', 0) * getattr(self, 'iptv_items_per_page', 30)
+        end_idx = start_idx + getattr(self, 'iptv_items_per_page', 30)
+        self.current_iptv_results = self.current_iptv_filtered[start_idx:end_idx]
+        
+        for c in self.current_iptv_results:
+            country = f" [{c.get('country', '')}]" if c.get('country') else ""
+            group = f" ({c.get('group', '')})" if c.get('group') else ""
+            self.lst_iptv.Append(f"{c['name']}{country}{group}")
+            
+    def on_iptv_search(self, event):
+        speech.say("Buscando canales...")
+        self.update_iptv_list(reset_page=True)
+        if self.lst_iptv.GetCount() > 0 and self.current_iptv_results:
+            speech.say(f"Se encontraron {len(self.current_iptv_filtered)} canales. Mostrando página 1 con {len(self.current_iptv_results)} canales.")
+            self.lst_iptv.SetFocus()
+            self.lst_iptv.SetSelection(0)
+        else:
+            speech.say("No se encontraron canales.")
+        
     def create_about_tab(self):
         tab = wx.Panel(self.notebook)
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -226,9 +400,11 @@ Usa la base de datos pública de Radio Browser.\n
         id_tab_2 = wx.NewIdRef()
         id_tab_3 = wx.NewIdRef()
         id_tab_4 = wx.NewIdRef()
+        id_meta = wx.NewIdRef()
 
         self.Bind(wx.EVT_MENU, lambda e: self.toggle_playback(), id=id_play)
         self.Bind(wx.EVT_MENU, lambda e: self.copy_current_url(), id=id_copy)
+        self.Bind(wx.EVT_MENU, lambda e: self.read_metadata(), id=id_meta)
         self.Bind(wx.EVT_MENU, lambda e: self.adjust_volume(5), id=id_vol_up)
         self.Bind(wx.EVT_MENU, lambda e: self.adjust_volume(-5), id=id_vol_down)
         self.Bind(wx.EVT_MENU, lambda e: self.on_prev_page(None), id=id_prev)
@@ -245,6 +421,7 @@ Usa la base de datos pública de Radio Browser.\n
             (wx.ACCEL_NORMAL, wx.WXK_F7, id_vol_down),
             (wx.ACCEL_CTRL, wx.WXK_LEFT, id_prev),
             (wx.ACCEL_CTRL, wx.WXK_RIGHT, id_next),
+            (wx.ACCEL_CTRL, ord('T'), id_meta),
             (wx.ACCEL_ALT, ord('1'), id_tab_1),
             (wx.ACCEL_ALT, ord('2'), id_tab_2),
             (wx.ACCEL_ALT, ord('3'), id_tab_3),
@@ -256,6 +433,8 @@ Usa la base de datos pública de Radio Browser.\n
         keycode = event.GetKeyCode()
         if keycode in [wx.WXK_RETURN, wx.WXK_SPACE]:
             self.toggle_playback()
+        elif event.ControlDown() and keycode == ord('T'):
+            self.read_metadata()
         else:
             event.Skip()
             
@@ -323,6 +502,27 @@ Usa la base de datos pública de Radio Browser.\n
         if idx != wx.NOT_FOUND and idx < len(stations):
             station = stations[idx]
             self.on_menu_copy(station)
+
+    def read_metadata(self):
+        if getattr(self, 'player', None) is None or getattr(self.player, 'player', None) is None or not self.player._is_playing:
+            speech.say("No hay ninguna radio reproduciendo en este momento.")
+            return
+            
+        try:
+            metadata = self.player.player.metadata
+            if not metadata:
+                speech.say("Esta radio no está enviando información de la canción.")
+                return
+                
+            title = metadata.get('icy-title') or metadata.get('title')
+            
+            if title and title.strip():
+                speech.say(f"Sonando: {title}")
+                self.SetStatusText(f"Sonando: {title}")
+            else:
+                speech.say("La radio está transmitiendo, pero no indica el nombre de la pista.")
+        except Exception:
+            speech.say("No se pudo extraer la información.")
 
     def load_favorites(self):
         try:
@@ -535,17 +735,27 @@ Usa la base de datos pública de Radio Browser.\n
         speech.say(msg)
                     
     def get_active_list(self):
-        sel = self.notebook.GetSelection()
-        if sel == 0: return self.lst_stations
-        if sel == 1: return self.lst_genre_stations
-        if sel == 2: return self.lst_favorites
+        page = self.notebook.GetSelection()
+        if page == 0:
+            return self.lst_stations
+        elif page == 1:
+            return self.lst_genre_stations
+        elif page == 2:
+            return self.lst_favorites
+        elif page == 3:
+            return self.lst_iptv
         return None
-
+        
     def get_active_stations(self):
-        sel = self.notebook.GetSelection()
-        if sel == 0: return self.home_stations
-        if sel == 1: return self.genre_stations
-        if sel == 2: return self.favorite_stations
+        page = self.notebook.GetSelection()
+        if page == 0:
+            return self.home_stations
+        elif page == 1:
+            return self.genre_stations
+        elif page == 2:
+            return self.favorite_stations
+        elif page == 3:
+            return getattr(self, 'current_iptv_results', [])
         return []
         
     def on_volume_change(self, event):
@@ -589,13 +799,42 @@ Usa la base de datos pública de Radio Browser.\n
         self.toggle_playback()
         
     def on_prev_page(self, event):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.load_page()
-            
+        sel = self.notebook.GetSelection()
+        if sel == 0:
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.load_page()
+        elif sel == 3:
+            if getattr(self, 'iptv_current_page', 0) > 0:
+                self.iptv_current_page -= 1
+                self.update_iptv_list(reset_page=False)
+                speech.say(f"Página {self.iptv_current_page + 1}. Se cargaron {len(self.current_iptv_results)} canales.")
+                self.lst_iptv.SetFocus()
+                if self.lst_iptv.GetCount() > 0:
+                    self.lst_iptv.SetSelection(0)
+            else:
+                speech.say("Ya estás en la primera página.")
+        else:
+            speech.say("Esta función solo está disponible en las pestañas principales.")
+
     def on_next_page(self, event):
-        self.current_page += 1
-        self.load_page()
+        sel = self.notebook.GetSelection()
+        if sel == 0:
+            self.current_page += 1
+            self.load_page()
+        elif sel == 3:
+            total_pages = (len(getattr(self, 'current_iptv_filtered', [])) - 1) // getattr(self, 'iptv_items_per_page', 30)
+            if getattr(self, 'iptv_current_page', 0) < total_pages:
+                self.iptv_current_page += 1
+                self.update_iptv_list(reset_page=False)
+                speech.say(f"Página {self.iptv_current_page + 1}. Se cargaron {len(self.current_iptv_results)} canales.")
+                self.lst_iptv.SetFocus()
+                if self.lst_iptv.GetCount() > 0:
+                    self.lst_iptv.SetSelection(0)
+            else:
+                speech.say("No hay más páginas.")
+        else:
+            speech.say("Esta función solo está disponible en las pestañas principales.")
         
     def load_page(self):
         page = self.current_page
